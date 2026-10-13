@@ -119,6 +119,7 @@ class Dep:
     version: str | None
     raw: str
     pinned: bool
+    indirect: bool = False
 
 def _parse_dependency_token(text: str) -> tuple[str | None, str | None, bool] | None:
     token = text.split(";", 1)[0].strip()
@@ -202,8 +203,10 @@ def parse_go_mod(text: str) -> list[Dep]:
         if not line or line.startswith("//"):
             continue
 
-        if "// indirect" in line:
-            continue
+        raw_line = line
+        line, _, comment = line.partition("//")
+        line = line.strip()
+        indirect = bool(re.match(r"\s*indirect(?:\s|$)", comment))
 
         if line == "require (":
             in_require_block = True
@@ -221,7 +224,8 @@ def parse_go_mod(text: str) -> list[Dep]:
                         ecosystem="go",
                         name=name,
                         version=version,
-                        raw=line,
+                        raw=raw_line,
+                        indirect=indirect,
                         pinned=True,
                     )
                 )
@@ -248,12 +252,20 @@ def parse_go_mod(text: str) -> list[Dep]:
                 ecosystem="go",
                 name=name,
                 version=version,
-                raw=line,
+                raw=raw_line,
+                indirect=indirect,
                 pinned=True,
             )
         )
 
     return deps
+
+def _dependency_summary(dep: Dep, summary: str) -> str:
+    if dep.indirect:
+        return (f"Indirect dependency: {summary} Upgrade the direct dependency that "
+                "requires it, or add an explicit require to override its version.")
+    return summary
+
 
 def check_offline(deps: list[Dep]) -> list[Finding]:
     findings: list[Finding] = []
@@ -264,7 +276,7 @@ def check_offline(deps: list[Dep]) -> list[Finding]:
         for spec, cve, sev, summary in eco_db.get(dep.name, []):
             if version_matches(dep.version, spec):
                 findings.append(Finding(dep.ecosystem, dep.name, dep.version,
-                                        cve, sev, summary))
+                                        cve, sev, _dependency_summary(dep, summary)))
     findings.sort(key=lambda f: SEV_RANK.get(f.severity, 9))
     return findings
 
@@ -292,7 +304,7 @@ def check_online_osv(deps: list[Dep], timeout: float = 10.0) -> list[Finding]:
             sev = _osv_severity(vuln)
             findings.append(Finding(dep.ecosystem, dep.name, dep.version,
                                     vuln.get("id", "OSV"), sev,
-                                    (vuln.get("summary") or "")[:200]))
+                                    _dependency_summary(dep, (vuln.get("summary") or "")[:200])))
     findings.sort(key=lambda f: SEV_RANK.get(f.severity, 9))
     return findings
 

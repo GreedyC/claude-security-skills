@@ -178,7 +178,7 @@ def test_parse_go_mod_single_require():
     assert gin.version == "v1.9.0"
     assert gin.pinned
 
-def test_parse_go_mod_skips_indirect_dependencies():
+def test_parse_go_mod_marks_indirect_dependencies():
     go_mod = """
     module example.com/myapp
 
@@ -192,8 +192,11 @@ def test_parse_go_mod_skips_indirect_dependencies():
 
     deps = checker.parse_go_mod(go_mod)
 
-    assert len(deps) == 1
+    assert len(deps) == 3
     assert deps[0].name == "github.com/gin-gonic/gin"
+    assert not deps[0].indirect
+    assert deps[1].indirect and deps[2].indirect
+    assert deps[1].raw.endswith("// indirect")
 
 def test_parse_go_mod_pseudo_version():
     go_mod = """
@@ -375,3 +378,48 @@ def test_run_min_severity_filters_vulnerabilities(tmp_path):
     f.write_text("jinja2==2.11.0\n")  # medium-severity advisory
     assert checker.run(str(f))["vulnerabilities"]
     assert checker.run(str(f), min_severity="high")["vulnerabilities"] == []
+
+
+@pytest.mark.parametrize("declaration", [
+    "require golang.org/x/crypto v0.0.0-20201216223049-8b5274cf687f // indirect",
+    "require (\n golang.org/x/crypto v0.0.0-20201216223049-8b5274cf687f // indirect\n)",
+])
+def test_indirect_go_vulnerability_is_reported_with_upgrade_hint(tmp_path, declaration):
+    manifest = tmp_path / "go.mod"
+    manifest.write_text(declaration, encoding="utf-8")
+    result = checker.run(str(manifest))
+    finding = next(f for f in result["vulnerabilities"] if f["id"] == "CVE-2022-27191")
+    assert finding["package"] == "golang.org/x/crypto"
+    assert finding["summary"].startswith("Indirect dependency:")
+    assert "Upgrade the direct dependency" in finding["summary"]
+    assert "explicit require" in finding["summary"]
+
+
+def test_indirect_patched_go_dependency_stays_clean():
+    deps = checker.parse_go_mod("require golang.org/x/crypto v0.17.0 // indirect")
+    assert deps[0].indirect
+    assert checker.check_offline(deps) == []
+
+
+def test_comment_mentioning_indirect_is_not_the_marker():
+    deps = checker.parse_go_mod("require example.com/module v1.0.0 // not indirect")
+    assert not deps[0].indirect
+
+
+def test_osv_queries_indirect_go_dependencies_without_network(monkeypatch):
+    import urllib.request
+    from unittest.mock import MagicMock
+
+    request = MagicMock()
+    request.return_value.__enter__.return_value.read.return_value = json.dumps({
+        "vulns": [{"id": "GO-TEST", "summary": "fixture advisory",
+                   "database_specific": {"severity": "HIGH"}}],
+    }).encode()
+    monkeypatch.setattr(urllib.request, "urlopen", request)
+    deps = checker.parse_go_mod("require golang.org/x/crypto v0.14.0 // indirect")
+    findings = checker.check_online_osv(deps)
+    request.assert_called_once()
+    sent = json.loads(request.call_args.args[0].data)
+    assert sent == {"version": "v0.14.0", "package": {"name": "golang.org/x/crypto", "ecosystem": "Go"}}
+    assert findings[0].id == "GO-TEST" and findings[0].severity == "high"
+    assert findings[0].summary.startswith("Indirect dependency:")

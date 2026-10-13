@@ -69,3 +69,11 @@ The bundled DB is intentionally small (well-known historical CVEs) so the tool
 is self-contained and testable. For comprehensive coverage use `--online`
 (OSV.dev) or integrate a dedicated scanner; treat the offline DB as a fast
 first pass.
+
+## Go indirect dependencies
+
+`go.mod` requirements are scanned whether direct or marked `// indirect`.
+Findings for indirect requirements are labelled and keep the advisory severity.
+Usually update the direct dependency that brings the module in, or add an explicit
+`require` to override its version. The optional `--online` OSV check includes these
+requirements too; offline checks still use only the bundled advisory database.
